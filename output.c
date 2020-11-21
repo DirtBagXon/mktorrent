@@ -16,39 +16,48 @@ You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 */
-#ifndef ALLINONE
+
+
 #include <sys/types.h>    /* off_t */
-#include <stdio.h>        /* printf() etc. */
+#include <stdio.h>        /* fprintf() etc. */
 #include <string.h>       /* strlen() etc. */
 #include <time.h>         /* time() */
+#include <inttypes.h>     /* PRIuMAX */
+#include <stdlib.h>       /* random() */
+
 #ifdef USE_OPENSSL
 #include <openssl/sha.h>  /* SHA_DIGEST_LENGTH */
 #else
-#include <inttypes.h>
 #include "sha1.h"
 #endif
 
-#include "mktorrent.h"
+#include "export.h"       /* EXPORT */
+#include "mktorrent.h"    /* struct metafile */
+#include "output.h"
 
-#define EXPORT
-#endif /* ALLINONE */
 
 /*
  * write announce list
  */
-static void write_announce_list(FILE *f, llist_t *list)
+static void write_announce_list(FILE *f, struct ll *list)
 {
 	/* the announce list is a list of lists of urls */
 	fprintf(f, "13:announce-listl");
 	/* go through them all.. */
-	for (; list; list = list->next) {
-		slist_t *l;
+	LL_FOR(tier_node, list) {
 
 		/* .. and print the lists */
 		fprintf(f, "l");
-		for (l = list->l; l; l = l->next)
+
+		LL_FOR(announce_url_node, LL_DATA_AS(tier_node, struct ll*)) {
+
+			const char *announce_url =
+				LL_DATA_AS(announce_url_node, const char*);
+
 			fprintf(f, "%lu:%s",
-					(unsigned long)strlen(l->s), l->s);
+					(unsigned long) strlen(announce_url), announce_url);
+		}
+
 		fprintf(f, "e");
 	}
 	fprintf(f, "e");
@@ -57,29 +66,31 @@ static void write_announce_list(FILE *f, llist_t *list)
 /*
  * write file list
  */
-static void write_file_list(FILE *f, flist_t *list)
+static void write_file_list(FILE *f, struct ll *list)
 {
 	char *a, *b;
 
 	fprintf(f, "5:filesl");
 
 	/* go through all the files */
-	for (; list; list = list->next) {
+	LL_FOR(file_node, list) {
+		struct file_data *fd = LL_DATA_AS(file_node, struct file_data*);
+
 		/* the file list contains a dictionary for every file
 		   with entries for the length and path
 		   write the length first */
-		fprintf(f, "d6:lengthi%" PRIoff "e4:pathl", list->size);
+		fprintf(f, "d6:lengthi%" PRIuMAX "e4:pathl", fd->size);
 		/* the file path is written as a list of subdirectories
 		   and the last entry is the filename
 		   sorry this code is even uglier than the rest */
-		a = list->path;
+		a = fd->path;
 		/* while there are subdirectories before the filename.. */
 		while ((b = strchr(a, DIRSEP_CHAR)) != NULL) {
 			/* set the next DIRSEP_CHAR to '\0' so fprintf
 			   will only write the first subdirectory name */
 			*b = '\0';
 			/* print it bencoded */
-			fprintf(f, "%lu:%s", (unsigned long)strlen(a), a);
+			fprintf(f, "%lu:%s", b - a, a);
 			/* undo our alteration to the string */
 			*b = DIRSEP_CHAR;
 			/* and move a to the beginning of the next
@@ -98,13 +109,16 @@ static void write_file_list(FILE *f, flist_t *list)
 /*
  * write web seed list
  */
-static void write_web_seed_list(FILE *f, slist_t *list)
+static void write_web_seed_list(FILE *f, struct ll *list)
 {
 	/* print the entry and start the list */
 	fprintf(f, "8:url-listl");
 	/* go through the list and write each URL */
-	for (; list; list = list->next)
-		fprintf(f, "%lu:%s", (unsigned long)strlen(list->s), list->s);
+	LL_FOR(node, list) {
+		const char *web_seed_url = LL_DATA_AS(node, const char*);
+		fprintf(f, "%lu:%s",
+			(unsigned long) strlen(web_seed_url), web_seed_url);
+	}
 	/* end the list */
 	fprintf(f, "e");
 }
@@ -113,23 +127,33 @@ static void write_web_seed_list(FILE *f, slist_t *list)
  * write metainfo to the file stream using all the information
  * we've gathered so far and the hash string calculated
  */
-EXPORT void write_metainfo(FILE *f, metafile_t *m, unsigned char *hash_string)
+EXPORT void write_metainfo(FILE *f, struct metafile *m, unsigned char *hash_string)
 {
 	/* let the user know we've started writing the metainfo file */
-	printf("Writing metainfo file... ");
+	printf("writing metainfo file... ");
 	fflush(stdout);
 
 	/* every metainfo file is one big dictonary */
 	fprintf(f, "d");
 
-	if (m->announce_list != NULL) {
+	if (!LL_IS_EMPTY(m->announce_list)) {
+
+		struct ll *first_tier =
+			LL_DATA_AS(LL_HEAD(m->announce_list), struct ll*);
+
 		/* write the announce URL */
+		const char *first_announce_url
+			= LL_DATA_AS(LL_HEAD(first_tier), const char*);
+
 		fprintf(f, "8:announce%lu:%s",
-			(unsigned long)strlen(m->announce_list->l->s),
-			m->announce_list->l->s);
+			(unsigned long) strlen(first_announce_url), first_announce_url);
+
 		/* write the announce-list entry if we have
-		   more than one announce URL */
-		if (m->announce_list->next || m->announce_list->l->next)
+		 * more than one announce URL, namely
+		 * a) there are at least two tiers, or      (first part of OR)
+		 * b) there are at least two URLs in tier 1 (second part of OR)
+		 */
+		if (LL_NEXT(LL_HEAD(m->announce_list)) || LL_NEXT(LL_HEAD(first_tier)))
 			write_announce_list(f, m->announce_list);
 	}
 
@@ -151,9 +175,19 @@ EXPORT void write_metainfo(FILE *f, metafile_t *m, unsigned char *hash_string)
 	/* first entry is either 'length', which specifies the length of a
 	   single file torrent, or a list of files and their respective sizes */
 	if (!m->target_is_directory)
-		fprintf(f, "6:lengthi%" PRIoff "e", m->file_list->size);
+		fprintf(f, "6:lengthi%" PRIuMAX "e",
+			LL_DATA_AS(LL_HEAD(m->file_list), struct file_data*)->size);
 	else
 		write_file_list(f, m->file_list);
+
+	if (m->cross_seed) {
+		fprintf(f, "12:x_cross_seed%u:mktorrent-", CROSS_SEED_RAND_LENGTH * 2 + 10);
+		for (int i = 0; i < CROSS_SEED_RAND_LENGTH; i++) {
+			unsigned char rand_byte = random();
+			fputc("0123456789ABCDEF"[rand_byte >> 4], f);
+			fputc("0123456789ABCDEF"[rand_byte & 0x0F], f);
+		}
+	}
 
 	/* the info section also contains the name of the torrent,
 	   the piece length and the hash string */
@@ -167,18 +201,21 @@ EXPORT void write_metainfo(FILE *f, metafile_t *m, unsigned char *hash_string)
 		fprintf(f, "7:privatei1e");
 
 	if (m->source)
-		fprintf(f, "6:source%lu:%s", (unsigned long)strlen(m->source), m->source);
+		fprintf(f, "6:source%lu:%s",
+			(unsigned long) strlen(m->source), m->source);
 
 	/* end the info section */
 	fprintf(f, "e");
 
 	/* add url-list if one is specified */
-	if (m->web_seed_list != NULL) {
-		if (m->web_seed_list->next == NULL)
+	if (!LL_IS_EMPTY(m->web_seed_list)) {
+		if (LL_IS_SINGLETON(m->web_seed_list)) {
+			const char *first_web_seed =
+				LL_DATA_AS(LL_HEAD(m->web_seed_list), const char*);
+
 			fprintf(f, "8:url-list%lu:%s",
-					(unsigned long)strlen(m->web_seed_list->s),
-					m->web_seed_list->s);
-		else
+					(unsigned long) strlen(first_web_seed), first_web_seed);
+		} else
 			write_web_seed_list(f, m->web_seed_list);
 	}
 
@@ -186,6 +223,6 @@ EXPORT void write_metainfo(FILE *f, metafile_t *m, unsigned char *hash_string)
 	fprintf(f, "e");
 
 	/* let the user know we're done already */
-	printf("done.\n");
+	printf("done\n");
 	fflush(stdout);
 }

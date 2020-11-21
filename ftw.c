@@ -16,7 +16,8 @@ You should have received a copy of the GNU General Public License
 along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 */
-#ifndef ALLINONE
+
+
 #include <stdlib.h>
 #include <errno.h>
 #include <string.h>
@@ -26,16 +27,10 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include <unistd.h>
 #include <dirent.h>
 
-#ifdef _WIN32
-#define DIRSEP_CHAR '\\'
-#else
-#define DIRSEP_CHAR '/'
-#endif /* _WIN32 */
-
-#define EXPORT
-#endif /* ALLINONE */
-
+#include "export.h"
+#include "mktorrent.h" /* DIRSEP_CHAR */
 #include "ftw.h"
+
 
 struct dir_state {
 	struct dir_state *next;
@@ -51,7 +46,7 @@ static struct dir_state *dir_state_new(struct dir_state *prev,
 	struct dir_state *ds = malloc(sizeof(struct dir_state));
 
 	if (ds == NULL) {
-		fprintf(stderr, "Out of memory.\n");
+		fprintf(stderr, "fatal error: out of memory\n");
 		return NULL;
 	}
 
@@ -66,7 +61,7 @@ static unsigned int dir_state_open(struct dir_state *ds, const char *name,
 {
 	ds->dir = opendir(name);
 	if (ds->dir == NULL) {
-		fprintf(stderr, "Error opening '%s': %s\n",
+		fprintf(stderr, "fatal error: cannot open '%s': %s\n",
 				name, strerror(errno));
 		return 1;
 	}
@@ -81,7 +76,7 @@ static unsigned int dir_state_reopen(struct dir_state *ds, char *name)
 	name[ds->length] = '\0';
 	ds->dir = opendir(name);
 	if (ds->dir == NULL) {
-		fprintf(stderr, "Error opening '%s': %s\n",
+		fprintf(stderr, "fatal error: cannot open '%s': %s\n",
 				name, strerror(errno));
 		return 1;
 	}
@@ -97,13 +92,13 @@ static unsigned int dir_state_close(struct dir_state *ds)
 {
 	ds->offset = telldir(ds->dir);
 	if (ds->offset < 0) {
-		fprintf(stderr, "Error getting dir offset: %s\n",
+		fprintf(stderr, "fatal error: cannot obtain dir offset: %s\n",
 				strerror(errno));
 		return 1;
 	}
 
 	if (closedir(ds->dir)) {
-		fprintf(stderr, "Error closing directory: %s\n",
+		fprintf(stderr, "fatal error: cannot close directory: %s\n",
 				strerror(errno));
 		return 1;
 	}
@@ -146,7 +141,7 @@ EXPORT int file_tree_walk(const char *dirname, unsigned int nfds,
 
 	path = malloc(path_size);
 	if (path == NULL) {
-		fprintf(stderr, "Out of memory.\n");
+		fprintf(stderr, "fatal error: out of memory\n");
 		return cleanup(ds, NULL, -1);
 	}
 	path_max = path + path_size;
@@ -161,7 +156,7 @@ EXPORT int file_tree_walk(const char *dirname, unsigned int nfds,
 
 			new_path = realloc(path, 2*path_size);
 			if (new_path == NULL) {
-				fprintf(stderr, "Out of memory.\n");
+				fprintf(stderr, "fatal error: out of memory\n");
 				return cleanup(ds, path, -1);
 			}
 			end = new_path + path_size;
@@ -210,7 +205,7 @@ EXPORT int file_tree_walk(const char *dirname, unsigned int nfds,
 
 					new_path = realloc(path, 2*path_size);
 					if (new_path == NULL) {
-						fprintf(stderr, "Out of memory.\n");
+						fprintf(stderr, "fatal error: out of memory\n");
 						return cleanup(ds, path, -1);
 					}
 					end = new_path + path_size;
@@ -221,7 +216,7 @@ EXPORT int file_tree_walk(const char *dirname, unsigned int nfds,
 			}
 
 			if (stat(path, &sbuf)) {
-				fprintf(stderr, "Error stat'ing '%s': %s\n",
+				fprintf(stderr, "fatal error: cannot stat '%s': %s\n",
 						path, strerror(errno));
 				return cleanup(ds, path, -1);
 			}
@@ -254,7 +249,7 @@ EXPORT int file_tree_walk(const char *dirname, unsigned int nfds,
 		} else {
 			if (closedir(ds->dir)) {
 				path[ds->length] = '\0';
-				fprintf(stderr, "Error closing '%s': %s\n",
+				fprintf(stderr, "fatal error: cannot close '%s': %s\n",
 					path, strerror(errno));
 				return cleanup(ds, path, -1);
 			}

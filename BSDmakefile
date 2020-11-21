@@ -18,7 +18,7 @@
 .include "Makefile"
 
 CC      ?= cc
-CFLAGS  ?= -O2 -Wall
+CFLAGS  ?= -O2 -Wall -Wextra -Wpedantic
 INSTALL ?= install
 PREFIX  ?= /usr/local
 
@@ -60,8 +60,8 @@ all: $(program)
 
 .SUFFIXES: .o .c
 .c.o:
-	$(CC) $(CFLAGS) $(DEFINES) -DPRIoff="\"`./prefix`d\"" -DVERSION="\"$(version)\"" -c $(.IMPSRC)
+	$(CC) $(CFLAGS) $(DEFINES) -DVERSION="\"$(version)\"" -c $(.IMPSRC)
 
-$(OBJS): $(HEADERS) prefix
+$(OBJS): $(HEADERS)
 
 .include "rules.mk"

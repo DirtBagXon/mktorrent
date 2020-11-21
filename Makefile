@@ -19,7 +19,7 @@
 
 # Default settings shown
 #CC      = cc
-#CFLAGS  = -O2 -Wall
+#CFLAGS  = -O2 -Wall -Wextra -Wpedantic
 #LDFLAGS =
 #INSTALL = install
 #PREFIX  = /usr/local
@@ -65,5 +65,5 @@
 program = mktorrent
 version = 1.1
 
-HEADERS  = mktorrent.h
-SRCS     = ftw.c init.c sha1.c hash.c output.c main.c
+HEADERS  = mktorrent.h ll.h
+SRCS     = ftw.c init.c sha1.c hash.c output.c main.c msg.c ll.c

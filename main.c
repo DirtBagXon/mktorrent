@@ -17,49 +17,27 @@ along with this program; if not, write to the Free Software
 Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 */
 
-#include <stdlib.h>      /* exit() */
-#include <sys/types.h>   /* off_t */
+
+#include <stdlib.h>      /* exit(), srandom() */
 #include <errno.h>       /* errno */
 #include <string.h>      /* strerror() */
 #include <stdio.h>       /* printf() etc. */
 #include <sys/stat.h>    /* S_IRUSR, S_IWUSR, S_IRGRP, S_IROTH */
 #include <fcntl.h>       /* open() */
+#include <time.h>        /* clock_gettime() */
 
-#ifdef ALLINONE
-#include <sys/stat.h>
-#include <unistd.h>      /* access(), read(), close(), getcwd(), sysconf() */
-#include <strings.h>     /* strcasecmp() */
-#include <inttypes.h>    /* PRId64 etc. */
-#include <ctype.h>       /* isdigit */
-#ifdef USE_LONG_OPTIONS
-#include <getopt.h>      /* getopt_long() */
-#endif
-#include <time.h>        /* time() */
-#include <dirent.h>      /* opendir(), closedir(), readdir() etc. */
-#ifdef USE_OPENSSL
-#include <openssl/sha.h> /* SHA1(), SHA_DIGEST_LENGTH */
-#else
-#include <inttypes.h>
-#endif
-#ifdef USE_PTHREADS
-#include <pthread.h>     /* pthread functions and data structures */
-#endif
-
-#define EXPORT static
-#else  /* ALLINONE */
-
-#define EXPORT
-#endif /* ALLINONE */
-
+#include "export.h"
 #include "mktorrent.h"
+#include "init.h"
+#include "hash.h"
+#include "output.h"
+#include "msg.h"
+#include "ll.h"
 
 #ifdef ALLINONE
-#include "ftw.c"
-#include "init.c"
+/* include all .c files in alphabetical order */
 
-#ifndef USE_OPENSSL
-#include "sha1.c"
-#endif
+#include "ftw.c"
 
 #ifdef USE_PTHREADS
 #include "hash_pthreads.c"
@@ -67,14 +45,15 @@ Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA
 #include "hash.c"
 #endif
 
+#include "init.c"
+#include "ll.c"
+#include "msg.c"
 #include "output.c"
-#else /* ALLINONE */
-/* init.c */
-extern void init(metafile_t *m, int argc, char *argv[]);
-/* hash.c */
-extern unsigned char *make_hash(metafile_t *m);
-/* output.c */
-extern void write_metainfo(FILE *f, metafile_t *m, unsigned char *hash_string);
+
+#ifndef USE_OPENSSL
+#include "sha1.c"
+#endif
+
 #endif /* ALLINONE */
 
 #ifndef O_BINARY
@@ -84,35 +63,34 @@ extern void write_metainfo(FILE *f, metafile_t *m, unsigned char *hash_string);
 #ifndef S_IRGRP
 #define S_IRGRP 0
 #endif
+
 #ifndef S_IROTH
 #define S_IROTH 0
 #endif
 
+
 /*
  * create and open the metainfo file for writing and create a stream for it
  * we don't want to overwrite anything, so abort if the file is already there
+ * and force is false
  */
-static FILE *open_file(const char *path)
+static FILE *open_file(const char *path, int force)
 {
 	int fd;  /* file descriptor */
 	FILE *f; /* file stream */
 
+	int flags = O_WRONLY | O_BINARY | O_CREAT;
+	if (!force)
+		flags |= O_EXCL;
+
 	/* open and create the file if it doesn't exist already */
-	fd = open(path, O_WRONLY | O_BINARY | O_CREAT | O_EXCL,
-		       S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-	if (fd < 0) {
-		fprintf(stderr, "Error creating '%s': %s\n",
-				path, strerror(errno));
-		exit(EXIT_FAILURE);
-	}
+	fd = open(path, flags, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+	FATAL_IF(fd < 0, "cannot create '%s': %s\n", path, strerror(errno));
 
 	/* create the stream from this filedescriptor */
 	f = fdopen(fd, "wb");
-	if (f == NULL) {
-		fprintf(stderr,	"Error creating stream for '%s': %s\n",
-				path, strerror(errno));
-		exit(EXIT_FAILURE);
-	}
+	FATAL_IF(f == NULL, "cannot create stream for '%s': %s\n",
+		path, strerror(errno));
 
 	return f;
 }
@@ -123,11 +101,7 @@ static FILE *open_file(const char *path)
 static void close_file(FILE *f)
 {
 	/* close the metainfo file */
-	if (fclose(f)) {
-		fprintf(stderr, "Error closing stream: %s\n",
-				strerror(errno));
-		exit(EXIT_FAILURE);
-	}
+	FATAL_IF(fclose(f), "cannot close stream: %s\n", strerror(errno));
 }
 
 /*
@@ -136,9 +110,9 @@ static void close_file(FILE *f)
 int main(int argc, char *argv[])
 {
 	FILE *file;	/* stream for writing to the metainfo file */
-	metafile_t m = {
+	struct metafile m = {
 		/* options */
-		18,   /* piece_length, 2^18 = 256kb by default */
+		0,    /* piece_length, 0 by default indicates length should be calculated automatically */
 		NULL, /* announce_list */
 		NULL, /* torrent_name */
 		NULL, /* metainfo_file_path */
@@ -148,7 +122,9 @@ int main(int argc, char *argv[])
 		0,    /* no_creation_date */
 		0,    /* private */
 		NULL, /* source string */
+		0,    /* cross_seed */
 		0,    /* verbose */
+		0,    /* force_overwrite */
 #ifdef USE_PTHREADS
 		0,    /* threads, initialised by init() */
 #endif
@@ -162,18 +138,31 @@ int main(int argc, char *argv[])
 	/* print who we are */
 	printf("mktorrent " VERSION " (c) 2007, 2009 Emil Renner Berthing\n\n");
 
+	/* seed PRNG with current time */
+	struct timespec ts;
+	FATAL_IF(clock_gettime(CLOCK_REALTIME, &ts) == -1,
+		"failed to get time: %s\n", strerror(errno));
+	srandom(ts.tv_nsec ^ ts.tv_sec);
+
 	/* process options */
 	init(&m, argc, argv);
 
 	/* open the file stream now, so we don't have to abort
 	   _after_ we did all the hashing in case we fail */
-	file = open_file(m.metainfo_file_path);
+	file = open_file(m.metainfo_file_path, m.force_overwrite);
 
-	/* calculate hash string and write the metainfo to file */
-	write_metainfo(file, &m, make_hash(&m));
+	/* calculate hash string... */
+	unsigned char *hash = make_hash(&m);
+
+	/* and write the metainfo to file */
+	write_metainfo(file, &m, hash);
 
 	/* close the file stream */
 	close_file(file);
+
+	/* free allocated memory */
+	cleanup_metafile(&m);
+	free(hash);
 
 	/* yeih! everything seemed to go as planned */
 	return EXIT_SUCCESS;
